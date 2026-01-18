@@ -101,10 +101,51 @@ def check_website(url):
 
     return results
 
+import concurrent.futures
+import threading
+
+# Thread locks
+print_lock = threading.Lock()
+file_lock = threading.Lock()
+completed_count = 0
+
+def process_single_url(url, total_websites, fieldnames, output_file):
+    global completed_count
+    
+    # Run the check
+    result = check_website(url)
+    
+    # Ensure all keys exist
+    for key in fieldnames:
+        if key not in result:
+            result[key] = ""
+            
+    # Thread-safe Output and Writing
+    with file_lock:
+        with open(output_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writerow(result)
+
+    # Thread-safe Printing
+    with print_lock:
+        completed_count += 1
+        print(f"\n{'='*60}")
+        print(f"Progress: [{completed_count}/{total_websites}] ({round(completed_count/total_websites*100, 1)}%)")
+        print(f"Checked: {url}")
+        
+        # Detailed output
+        print(f"  Title:    {result['site_title'][:50]}..." if len(result['site_title']) > 50 else f"  Title:    {result['site_title']}")
+        print(f"  WP:       {result['is_wordpress']}")
+        print(f"  Theme:    {result['theme']}")
+        print(f"  Plugins:  {result['plugin_count']} ({result['plugin_names'][:60]}...)")
+        print(f"  Tech:     Woo: {'YES' if result['has_woocommerce'] else 'No'} | Shop: {'YES' if result['has_shopify'] else 'No'} | GA: {'YES' if result['has_analytics'] else 'No'} | Pixel: {'YES' if result['has_pixel'] else 'No'}")
+        print(f"  Health:   HTTPS: {'YES' if result['is_https'] else 'No'} | Mobile: {'YES' if result['has_viewport'] else 'No'} | Time: {result['load_time_seconds']}s")
+        print(f"{'='*60}")
+
 def main():
     input_file = 'websites.csv'
     output_file = 'results.csv'
-    BATCH_SIZE = 100
+    WORKER_COUNT = 10
     
     print(f"Reading from {input_file}...")
     
@@ -119,8 +160,11 @@ def main():
         print(f"Error: {input_file} not found.")
         return
 
+    # Clean duplicates if any (optional, but good for 19k list)
+    websites = list(set(websites))
     total_websites = len(websites)
-    print(f"Found {total_websites} websites. Starting check...")
+    print(f"Found {total_websites} unique websites.")
+    print(f"Starting check with {WORKER_COUNT} parallel workers...")
 
     # Initialize output file with headers
     fieldnames = [
@@ -132,44 +176,21 @@ def main():
         'is_https', 'has_viewport'
     ]
     
+    # Write Header
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
-    batch_results = []
+    # Determine optimal worker count
+    # Provide at least 1 worker, max 10 as requested
+    max_workers = min(WORKER_COUNT, total_websites) if total_websites > 0 else 1
     
-    for index, url in enumerate(websites, 1):
-        # Progress UI
-        print(f"\n{'='*60}")
-        print(f"Progress: [{index}/{total_websites}] ({round(index/total_websites*100, 1)}%)")
-        print(f"Checking: {url}")
-        print(f"{'='*60}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_single_url, url, total_websites, fieldnames, output_file): url for url in websites}
         
-        result = check_website(url)
-        
-        # Ensure all keys exist
-        for key in fieldnames:
-            if key not in result:
-                result[key] = ""
-        
-        batch_results.append(result)
-        
-        # Detailed output
-        print(f"  Title:    {result['site_title'][:50]}..." if len(result['site_title']) > 50 else f"  Title:    {result['site_title']}")
-        print(f"  WP:       {result['is_wordpress']}")
-        print(f"  Theme:    {result['theme']}")
-        print(f"  Plugins:  {result['plugin_count']} ({result['plugin_names'][:60]}...)")
-        print(f"  Tech:     Woo: {'YES' if result['has_woocommerce'] else 'No'} | Shop: {'YES' if result['has_shopify'] else 'No'} | GA: {'YES' if result['has_analytics'] else 'No'} | Pixel: {'YES' if result['has_pixel'] else 'No'}")
-        print(f"  Health:   HTTPS: {'YES' if result['is_https'] else 'No'} | Mobile: {'YES' if result['has_viewport'] else 'No'} | Time: {result['load_time_seconds']}s")
-
-        # Batch Save
-        if len(batch_results) >= BATCH_SIZE or index == total_websites:
-            print(f"\n[Saving Batch of {len(batch_results)} results to {output_file} ...]")
-            with open(output_file, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                for res in batch_results:
-                    writer.writerow(res)
-            batch_results = [] # Clear batch
+        # Wait for all to complete (optional: could process results as they come in)
+        concurrent.futures.wait(futures)
 
     print(f"\n{'='*60}")
     print(f"DONE! All {total_websites} websites checked.")
